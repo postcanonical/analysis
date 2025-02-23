@@ -3,6 +3,7 @@ import sys
 import random
 import pandas as pd
 import numpy as np
+import argparse  # New: for parsing command-line options
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QGridLayout, QVBoxLayout, QHBoxLayout,
@@ -30,8 +31,9 @@ class DataVisualizationTool(QWidget):
       - Copying/pasting data (including randomizing paste positions).
       - Computing amplitude and phase via an external function (get_amp_phase).
     """
-    def __init__(self):
+    def __init__(self, num_pairs=None):  # New: Accept an optional predefined number of pairs
         super().__init__()
+        self.predefined_num_pairs = num_pairs  # Store predefined num_pairs if provided
         self.setWindowTitle("Data Visualization Tool")
 
         # 1) Variable & UI initialization
@@ -160,8 +162,7 @@ class DataVisualizationTool(QWidget):
     # -------------------------------------------------------------------------
     def load_initial_data(self):
         """Load initial data from the default file path."""
-        data_file_path = os.path.join('Andrii', 'raw', 'rawdata_cal.dat')
-        self.load_data_file(data_file_path)
+        self.load_data()
         self.initialize_plot_arrays()
 
     def load_data_file(self, file_path):
@@ -184,9 +185,15 @@ class DataVisualizationTool(QWidget):
                 self.data = self.data.iloc[::-1].reset_index(drop=True)
                 print(f"Loaded space-separated data from {file_path} and reversed rows")
 
-            # Calculate how many pairs of columns to plot
-            self.num_pairs = len([col for col in self.data.columns if col.isdigit()]) // 2
-            print(f"Number of column pairs to plot: {self.num_pairs}")
+            # Calculate how many pairs of columns are available
+            computed_pairs = len([col for col in self.data.columns if col.isdigit()]) // 2
+            if self.predefined_num_pairs is not None:
+                # Use the predefined number, but not more than available
+                self.num_pairs = min(self.predefined_num_pairs, computed_pairs)
+                print(f"Predefined number of column pairs: {self.num_pairs} (available: {computed_pairs})")
+            else:
+                self.num_pairs = computed_pairs
+                print(f"Number of column pairs to plot: {self.num_pairs}")
 
             # Reinitialize scatter and selection lines with the correct size
             self.plot_scatter_grouped = np.empty((self.num_pairs, 2), dtype=object)
@@ -793,7 +800,7 @@ class DataVisualizationTool(QWidget):
         """
         options = QFileDialog.Options()
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Open Data File", "",
+            self, "Select a Data File", "",
             "Data Files (*.csv *.dat *.txt);;All Files (*)", options=options
         )
         if file_name:
@@ -1082,7 +1089,13 @@ class DataVisualizationTool(QWidget):
 # Main Execution
 # -------------------------------------------------------------------------
 if __name__ == '__main__':
+    # New: Parse command-line arguments to accept a predefined num_pairs option
+    parser = argparse.ArgumentParser(description="Data Visualization Tool")
+    parser.add_argument('--num_pairs', type=int, default=None,
+                        help="Predefined number of column pairs to plot")
+    args, unknown = parser.parse_known_args()
+
     app = QApplication(sys.argv)
-    window = DataVisualizationTool()
+    window = DataVisualizationTool(num_pairs=args.num_pairs)
     window.show()
     sys.exit(app.exec_())
