@@ -1,4 +1,3 @@
-.aider*
 .env
 .venv
 .vscode
@@ -6,5 +5,3 @@ __pycache__/
 *.py[cod]
 saved/*
 .gitignore
-Andrii/
-presentation/
