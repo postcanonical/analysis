@@ -18,19 +18,39 @@ from matplotlib.figure import Figure
 from matplotlib.widgets import SpanSelector
 
 from phase import get_amp_phase  # Ensure this module is available
+import matplotlib.pyplot as plt  # For isinstance checks (if needed)
 
 
 class DataVisualizationTool(QWidget):
+    """
+    A PyQt5-based data visualization tool that supports:
+      - Loading data (CSV or space-separated).
+      - Displaying column pairs in multiple plot types.
+      - Selecting data ranges (via SpanSelector or precise indices).
+      - Copying/pasting data (including randomizing paste positions).
+      - Computing amplitude and phase via an external function (get_amp_phase).
+    """
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Data Visualization Tool")
+
+        # 1) Variable & UI initialization
         self.init_variables()
         self.init_ui()
+
+        # 2) Load initial data & create plots
         self.load_initial_data()
         self.create_plots()
+
+        # 3) Keyboard shortcuts
         self.setup_shortcuts()
+
+        # 4) Show the main window maximized
         self.showMaximized()
 
+    # -------------------------------------------------------------------------
+    # Initialization & Setup
+    # -------------------------------------------------------------------------
     def init_variables(self):
         """Initialize variables used throughout the class."""
         self.copied_data = pd.DataFrame()
@@ -41,14 +61,23 @@ class DataVisualizationTool(QWidget):
         self.phase = []
         self.is_zooming = False
 
+        # Will be updated once data is loaded
+        self.plot_scatter_grouped = np.empty((1, 2), dtype=object)
+        self.selection_lines = []  # For storing vertical lines in grouped plots
+
     def init_ui(self):
         """Initialize the user interface components."""
+        # Main layout
         self.main_layout = QHBoxLayout()
         self.setLayout(self.main_layout)
 
+        # Plot area on the left
         self.init_plot_area()
+
+        # Button panel on the right
         self.init_button_panel()
 
+        # Add widgets to the main layout
         self.main_layout.addWidget(self.plot_widget)
         self.main_layout.addWidget(self.button_widget)
 
@@ -65,10 +94,15 @@ class DataVisualizationTool(QWidget):
         self.button_widget.setLayout(self.button_layout)
         self.button_widget.setFixedWidth(300)
 
+        # Main buttons
         self.add_main_buttons()
+        # Sub-button placeholder (hidden by default)
         self.add_sub_button_placeholder()
+        # Status bar
         self.add_status_bar()
+        # Spacer
         self.add_spacer()
+        # Connect main buttons
         self.connect_main_buttons()
 
     def add_main_buttons(self):
@@ -87,11 +121,11 @@ class DataVisualizationTool(QWidget):
             self.button_layout.addWidget(button)
 
     def add_sub_button_placeholder(self):
-        """Add a placeholder for sub-buttons."""
+        """Add a placeholder group box for sub-buttons."""
         self.sub_button_layout = QVBoxLayout()
         self.sub_button_widget = QGroupBox()
         self.sub_button_widget.setLayout(self.sub_button_layout)
-        self.sub_button_widget.hide()
+        self.sub_button_widget.hide()  # Hidden by default
         self.button_layout.addWidget(self.sub_button_widget)
 
     def add_status_bar(self):
@@ -103,7 +137,7 @@ class DataVisualizationTool(QWidget):
         self.button_layout.addWidget(self.status_bar)
 
     def add_spacer(self):
-        """Add a spacer to push elements to the top."""
+        """Add a vertical spacer to push elements to the top."""
         self.button_layout.addSpacerItem(
             QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding)
         )
@@ -116,24 +150,48 @@ class DataVisualizationTool(QWidget):
         self.load_data_button.clicked.connect(self.load_data)
 
     def setup_shortcuts(self):
-        """Set up keyboard shortcuts for the application."""
+        """Set up keyboard shortcuts for copy/paste functionality."""
         QShortcut(QKeySequence("Ctrl+C"), self).activated.connect(self.copy_data)
         QShortcut(QKeySequence("Ctrl+V"), self).activated.connect(self.paste_data)
         QShortcut(QKeySequence("Ctrl+Shift+V"), self).activated.connect(self.show_randomize_paste_options)
 
+    # -------------------------------------------------------------------------
+    # Data Loading & Initialization
+    # -------------------------------------------------------------------------
     def load_initial_data(self):
-        """Load initial data from the specified file."""
+        """Load initial data from the default file path."""
         data_file_path = os.path.join('Andrii', 'raw', 'rawdata_cal.dat')
         self.load_data_file(data_file_path)
         self.initialize_plot_arrays()
 
     def load_data_file(self, file_path):
-        """Load data from the specified file."""
+        """
+        Load data from the specified file and rename columns if necessary.
+        - If CSV, load as CSV with existing headers.
+        - Otherwise, assume space-separated file.
+        - Reverse data rows and reset index.
+        - Initialize references for plots.
+        """
         try:
-            self.data = pd.read_csv(file_path, sep=r'\s+', header=None)
-            self.data = self.data.iloc[::-1].reset_index(drop=True)
-            print(f"Data loaded and reversed successfully from {file_path}")
-            self.num_pairs = len(self.data.columns) // 2 - 1
+            if file_path.endswith('.csv'):
+                self.data = pd.read_csv(file_path)
+                print(f"Loaded CSV data from {file_path}")
+            else:
+                self.data = pd.read_csv(file_path, sep=r'\s+', header=None)
+                num_cols = self.data.shape[1]
+                self.data.columns = [str(i) for i in range(num_cols)]
+                # Reverse rows
+                self.data = self.data.iloc[::-1].reset_index(drop=True)
+                print(f"Loaded space-separated data from {file_path} and reversed rows")
+
+            # Calculate how many pairs of columns to plot
+            self.num_pairs = len([col for col in self.data.columns if col.isdigit()]) // 2
+            print(f"Number of column pairs to plot: {self.num_pairs}")
+
+            # Reinitialize scatter and selection lines with the correct size
+            self.plot_scatter_grouped = np.empty((self.num_pairs, 2), dtype=object)
+            self.selection_lines = [[[] for _ in range(2)] for _ in range(self.num_pairs)]
+
         except FileNotFoundError:
             QMessageBox.critical(self, "Error", f"Data file not found: {file_path}")
             sys.exit(1)
@@ -156,209 +214,373 @@ class DataVisualizationTool(QWidget):
         self.amplitude = np.zeros(self.num_pairs)
         self.phase = np.zeros(self.num_pairs)
 
+    # -------------------------------------------------------------------------
+    # Plot Creation
+    # -------------------------------------------------------------------------
     def create_plots(self):
-        """Create all plots for the data."""
+        """Create all plots for each pair of columns."""
         for row in range(self.num_pairs):
             self.create_individual_plots(row)
 
     def create_individual_plots(self, row):
-        """Create individual plots for a given row."""
+        """
+        Create individual plots for a given row (i.e., for a pair of columns):
+          1) Two subplots grouped (colN vs index, colN+1 vs index)
+          2) One subplot (colN vs colN+1)
+        """
         colN = row * 2
         colN1 = colN + 1
+        colN_str = str(colN)
+        colN1_str = str(colN1)
 
+        # -- 1) GROUPED PLOTS ------------------------------------------------
         fig_grouped, canvas_grouped = self.create_grouped_plot(row)
         self.figures[row, 0], self.canvases[row, 0] = fig_grouped, canvas_grouped
 
-        ax1, line1 = self.plot_column_vs_index(fig_grouped, self.data[colN], f'Column {colN}', row, 0)
-        ax2, line2 = self.plot_column_vs_index(fig_grouped, self.data[colN1], f'Column {colN1}', row, 1, sharex=ax1)
+        # Plot colN vs index
+        ax1, line1 = self.plot_column_vs_index(
+            fig=fig_grouped,
+            data_column=self.data[colN_str],
+            label=f'Column {colN_str}',
+            row=row,
+            subplot_index=0
+        )
 
-        self.plot_lines_grouped[row, 0], self.plot_lines_grouped[row, 1] = line1, line2
+        # Plot colN+1 vs index
+        ax2, line2 = self.plot_column_vs_index(
+            fig=fig_grouped,
+            data_column=self.data[colN1_str],
+            label=f'Column {colN1_str}',
+            row=row,
+            subplot_index=1,
+            sharex=ax1
+        )
+
+        # Store references
+        self.plot_lines_grouped[row, 0] = line1
+        self.plot_lines_grouped[row, 1] = line2
         self.axes_grouped[row].extend([ax1, ax2])
 
+        # Scatter for defect probability columns
+        prob_col_name = f'defect_proba_{colN // 2 + 1}'
+        if prob_col_name in self.data.columns:
+            print(f"Found {prob_col_name} for pair (col{colN_str}, col{colN1_str})")
+            scatter1 = ax1.scatter(
+                self.data.index,
+                self.data[colN_str],
+                c=self.data[prob_col_name],
+                cmap='bwr',
+                vmin=0,
+                vmax=1,
+                s=10,
+                edgecolors='none',
+                alpha=0.6
+            )
+            scatter2 = ax2.scatter(
+                self.data.index,
+                self.data[colN1_str],
+                c=self.data[prob_col_name],
+                cmap='bwr',
+                vmin=0,
+                vmax=1,
+                s=10,
+                edgecolors='none',
+                alpha=0.6
+            )
+            self.plot_scatter_grouped[row, 0] = scatter1
+            self.plot_scatter_grouped[row, 1] = scatter2
+        else:
+            print(f"No {prob_col_name} found for pair (col{colN_str}, col{colN1_str})")
+            self.plot_scatter_grouped[row, 0] = None
+            self.plot_scatter_grouped[row, 1] = None
+
+        # Create SpanSelectors
         self.span_selectors[row, 0] = self.create_span_selector(ax1)
         self.span_selectors[row, 1] = self.create_span_selector(ax2)
 
+        # Synchronize axes
         self.synchronize_axes(ax1, ax2)
 
+        # -- 2) COLN vs COLN+1 PLOT -------------------------------------------
         fig_colcol, canvas_colcol = self.create_plot_with_toolbar(row)
         self.figures[row, 1], self.canvases[row, 1] = fig_colcol, canvas_colcol
 
-        ax_colcol, line_colcol = self.plot_column_vs_column(fig_colcol, self.data[colN], self.data[colN1], colN, colN1)
+        ax_colcol, line_colcol = self.plot_column_vs_column(
+            fig_colcol,
+            self.data[colN_str],
+            self.data[colN1_str],
+            colN_str,
+            colN1_str
+        )
         self.plot_lines_colcol[row, 0] = line_colcol
         self.axes_colcol[row].append(ax_colcol)
 
     def create_grouped_plot(self, row):
-        """Create a grouped plot widget with two subplots."""
+        """Create a grouped plot widget with two subplots (col vs index)."""
         fig = Figure(facecolor='black', constrained_layout=True)
         canvas = FigureCanvas(fig)
         toolbar = NavigationToolbar(canvas, self)
+
         self.plot_layout.addWidget(toolbar, row * 2, 0)
         self.plot_layout.addWidget(canvas, row * 2 + 1, 0)
         return fig, canvas
 
     def create_plot_with_toolbar(self, row):
-        """Create a plot with a navigation toolbar."""
+        """Create a single subplot widget for col vs col with a navigation toolbar."""
         fig = Figure(facecolor='black', constrained_layout=True)
         canvas = FigureCanvas(fig)
         toolbar = NavigationToolbar(canvas, self)
+
         self.plot_layout.addWidget(toolbar, row * 2, 1)
         self.plot_layout.addWidget(canvas, row * 2 + 1, 1)
         return fig, canvas
 
     def plot_column_vs_index(self, fig, data_column, label, row, subplot_index, sharex=None):
-        """Plot a data column against index."""
-        ax = fig.add_subplot(211 + subplot_index, sharex=sharex) if sharex else fig.add_subplot(211 + subplot_index)
-        line, = ax.plot(self.data.index, data_column, label=label)
-        self.setup_plot(ax, label if subplot_index == 0 else '', '', 'Voltage')
+        """
+        Plot a data column against its index.
+        :param fig: Figure to draw on
+        :param data_column: The Pandas Series to plot
+        :param label: Label for the plot
+        :param row: Row index (which column pair we are on)
+        :param subplot_index: 0 or 1 (top or bottom in the grouped plot)
+        :param sharex: Axis object to share x-axis with, if any
+        :return: (axis, line) tuple
+        """
+        if sharex:
+            ax = fig.add_subplot(211 + subplot_index, sharex=sharex)
+        else:
+            ax = fig.add_subplot(211 + subplot_index)
+
+        line, = ax.plot(
+            self.data.index,
+            data_column,
+            label=label,
+            color='white',
+            linewidth=1
+        )
+
+        self.setup_plot(ax, title=label if subplot_index == 0 else '', xlabel='', ylabel='Voltage')
         if subplot_index == 0:
             ax.tick_params(labelbottom=False, bottom=False)
         self.set_dark_theme(ax)
         return ax, line
 
-    def plot_column_vs_column(self, fig, x_data, y_data, colN, colN1):
-        """Plot one data column against another."""
+    def plot_column_vs_column(self, fig, x_data, y_data, colN_str, colN1_str):
+        """
+        Plot one data column (x_data) vs another data column (y_data).
+        :return: (axis, line) tuple
+        """
         ax = fig.add_subplot(111)
-        line, = ax.plot(x_data, y_data, 'g')
-        self.setup_plot(ax, f'Column {colN} vs Column {colN1}', f'Column {colN}', f'Column {colN1}')
+        line, = ax.plot(
+            x_data,
+            y_data,
+            'g',
+            label=f'Column {colN_str} vs Column {colN1_str}'
+        )
+        self.setup_plot(ax, f'Column {colN_str} vs Column {colN1_str}', f'Column {colN_str}', f'Column {colN1_str}')
         self.set_dark_theme(ax)
         return ax, line
 
     def setup_plot(self, ax, title, xlabel='', ylabel=''):
-        """Setup plot aesthetics."""
+        """Setup plot aesthetics for a given axis."""
         ax.set_title(title)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.grid(color='gray', linestyle='--', linewidth=0.5)
 
     def set_dark_theme(self, ax):
-        """Set dark theme for the plot axes."""
+        """Apply a dark theme to the provided axis."""
         ax.set_facecolor('black')
         ax.tick_params(colors='white')
         ax.xaxis.label.set_color('white')
         ax.yaxis.label.set_color('white')
         ax.title.set_color('white')
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray')
 
     def create_span_selector(self, ax):
-        """Create a SpanSelector for a given axis."""
+        """Create a SpanSelector for horizontal selection in a given axis."""
         return SpanSelector(
-            ax, self.on_select, 'horizontal', useblit=False, props=dict(alpha=0.5, facecolor='red')
+            ax,
+            self.on_select,
+            'horizontal',
+            useblit=False,
+            props=dict(alpha=0.5, facecolor='red')
         )
 
     def synchronize_axes(self, ax1, ax2):
-        """Synchronize x-limits and y-limits between two axes."""
+        """
+        Synchronize x-limits and y-limits between two axes.
+        Connect callbacks that will be triggered upon limit changes.
+        """
         ax1.callbacks.connect('xlim_changed', self.on_xlim_changed_grouped)
         ax1.callbacks.connect('ylim_changed', self.on_ylim_changed_grouped)
         ax2.callbacks.connect('xlim_changed', self.on_xlim_changed_grouped)
         ax2.callbacks.connect('ylim_changed', self.on_ylim_changed_grouped)
 
+    # -------------------------------------------------------------------------
+    # Data Selection & SpanSelector Event
+    # -------------------------------------------------------------------------
     def on_select(self, xmin, xmax):
-        """Handle data selection via SpanSelector."""
-        # Add validation to ensure xmin and xmax are valid numbers
+        """
+        Handle data selection via SpanSelector.
+        Mark the selected range, store copied_data, and compute phases.
+        """
         if not isinstance(xmin, (int, float)) or not isinstance(xmax, (int, float)):
             print("Invalid selection")
             return
 
-        print(f"Selection from {xmin} to {xmax}")
         xmin, xmax = int(np.round(xmin)), int(np.round(xmax))
-
-        # Clamp values to valid range
         xmin, xmax = max(0, xmin), min(len(self.data) - 1, xmax)
-
         idx = (self.data.index >= xmin) & (self.data.index <= xmax)
+        print(f"Selection from {xmin} to {xmax}, {idx.sum()} entries selected.")
 
-        print(f"Selected indices: {idx.sum()} entries")
-
-        # Store all selected columns
+        # Store selected slice
         self.copied_data = self.data.loc[idx].copy()
 
-        # Update specific plots
+        # Update selection in the plots
         for row in range(self.num_pairs):
             self.update_selection_plots(row, idx, xmin, xmax)
 
-        # Compute phases for selected indices
+        # Compute phases for the selected indices
         selected_indices = self.data.index[idx]
         self.update_phases(selected_indices)
 
     def update_selection_plots(self, row, idx, xmin, xmax):
-        """Update plots based on the selection."""
+        """
+        Update plots based on the selected range for a given row.
+        This includes:
+          - Updating col vs col plot to show only selected slice.
+          - Drawing vertical lines in the col vs index plots.
+          - Redrawing updated canvases.
+        """
         colN = row * 2
         colN1 = colN + 1
+        colN_str, colN1_str = str(colN), str(colN1)
 
-        # Update colN vs colN+1 plot
-        line = self.plot_lines_colcol[row, 0]
-        line.set_xdata(self.data.loc[idx, colN])
-        line.set_ydata(self.data.loc[idx, colN1])
-        ax = self.axes_colcol[row][0]
-        ax.relim()
-        ax.autoscale_view()
-        self.canvases[row, 1].draw_idle()
+        # 1) Update colN vs colN+1 line to show only the selected slice
+        line_colcol = self.plot_lines_colcol[row, 0]
+        selected_x = self.data.loc[idx, colN_str]
+        selected_y = self.data.loc[idx, colN1_str]
+        line_colcol.set_xdata(selected_x)
+        line_colcol.set_ydata(selected_y)
 
-        # Update vertical lines in the grouped plots
-        for ax in self.axes_grouped[row]:
-            self.clear_vertical_lines(ax)
-            ax.axvline(x=xmin, color='green', linestyle='--')
-            ax.axvline(x=xmax, color='green', linestyle='--')
-            self.canvases[row, 0].draw_idle()
+        ax_colcol = self.axes_colcol[row][0]
+        ax_colcol.relim()
+        ax_colcol.autoscale_view()
 
-    def clear_vertical_lines(self, ax):
-        """Clear vertical lines from an axis."""
-        lines_to_remove = [line for line in ax.lines[1:] if line.get_linestyle() == '--']
-        for line in lines_to_remove:
-            line.remove()
+        # 2) For col vs index, add vertical lines at xmin and xmax
+        prob_col_name = f'defect_proba_{colN_str}'
+        has_defect_proba = prob_col_name in self.data.columns
+
+        for subplot_index in range(2):
+            ax = self.axes_grouped[row][subplot_index]
+
+            # Clear old vertical lines
+            self.clear_vertical_lines(row, subplot_index)
+
+            # Draw new vertical lines
+            self.draw_selection_lines(row, subplot_index, ax, xmin, xmax)
+
+            # Update the y-data
+            if subplot_index == 0:
+                y_data = self.data[colN_str]
+            else:
+                y_data = self.data[colN1_str]
+            self.plot_lines_grouped[row, subplot_index].set_ydata(y_data)
+            ax.relim()
+            ax.autoscale_view()
+
+            # Update scatter if it exists
+            scatter = self.plot_scatter_grouped[row, subplot_index]
+            if scatter and has_defect_proba:
+                scatter.set_offsets(np.column_stack((self.data.index, y_data)))
+                scatter.set_array(self.data[prob_col_name].values)
+
+        # 3) Redraw
+        self.canvases[row, 0].draw_idle()  # Grouped col vs index
+        self.canvases[row, 1].draw_idle()  # col vs col
+
+    def clear_vertical_lines(self, row, subplot_index):
+        """Remove old vertical lines from a subplot."""
+        lines = self.selection_lines[row][subplot_index]
+        for ln in lines:
+            ln.remove()
+        self.selection_lines[row][subplot_index] = []
+
+    def draw_selection_lines(self, row, subplot_index, ax, xmin, xmax):
+        """Draw green dashed vertical lines on the axis for the selected range."""
+        line1 = ax.axvline(x=xmin, color='green', linestyle='--')
+        line2 = ax.axvline(x=xmax, color='green', linestyle='--')
+        self.selection_lines[row][subplot_index] = [line1, line2]
 
     def update_phases(self, indices):
-        """Compute and update phases for selected indices."""
+        """Compute and update phases for selected indices across all column pairs."""
         phases = self.compute_phases_for_column_pairs(self.data, indices)
-        for row, (amplitude, phase) in phases.items():
-            self.amplitude[row] = amplitude
-            self.phase[row] = phase
+        for row, (amp, ph) in phases.items():
+            self.amplitude[row] = amp
+            self.phase[row] = ph
         self.update_status_bar()
 
     def compute_phases_for_column_pairs(self, data, indices):
-        """Compute amplitudes and phases for all column pairs over specified indices."""
+        """
+        Compute amplitudes and phases for all column pairs over the specified indices
+        using the external get_amp_phase function.
+        """
         phases = {}
         for row in range(self.num_pairs):
-            colN, colN1 = row * 2, row * 2 + 1
-            x = data.loc[indices, colN].values
-            y = data.loc[indices, colN1].values
+            colN = row * 2
+            colN1 = colN + 1
+            colN_str, colN1_str = str(colN), str(colN1)
+            x = data.loc[indices, colN_str].values
+            y = data.loc[indices, colN1_str].values
 
             if len(x) < 2 or len(y) < 2:
                 print(f"Not enough data to compute phase for pair {row}")
                 continue
 
-            position, width = len(x) // 2, len(x) // 2
+            position = len(x) // 2
+            width = len(x) // 2
+
             try:
-                amplitude, phase = get_amp_phase(
+                amp, ph = get_amp_phase(
                     list(zip(x, y)),
                     position=position,
                     width=width,
                     is_calibrated=self.is_calibrated,
                     calibration=self.calibration
                 )
-                phases[row] = (amplitude, phase)
-                print(f"Row {row}: Amplitude: {amplitude:.2f}, Phase: {phase:.2f}°")
+                phases[row] = (amp, ph)
+                print(f"Row {row}: Amplitude={amp:.2f}, Phase={ph:.2f}°")
             except Exception as e:
                 print(f"Error computing phase for pair {row}: {e}")
         return phases
 
+    # -------------------------------------------------------------------------
+    # Copy & Paste Operations
+    # -------------------------------------------------------------------------
     def copy_data(self):
-        """Copy selected data and compute its phase."""
+        """Copy the currently selected data to self.copied_data and compute its phase."""
         if self.copied_data.empty:
             print("No data selected to copy.")
+            QMessageBox.warning(self, "Copy Data", "No data selected to copy.")
             return
 
         copied_indices = self.copied_data.index
+
+        # Reset previous slices
         self.reset_previous_copies()
+
+        # Mark newly copied data
         self.data.loc[copied_indices, 'slice_number'] = -1
         print("Data copied and marked with 'slice_number' = -1.")
 
-        # Clear and compute phases
+        # Clear old phases, then compute & assign new phases
         self.clear_phases(copied_indices)
         phases = self.compute_phases_for_column_pairs(self.data, copied_indices)
         self.assign_phases(copied_indices, phases)
 
     def reset_previous_copies(self):
-        """Reset 'slice_number' and 'phase_{row}' columns for previously copied data."""
+        """Reset 'slice_number' and phase columns for any previously copied data."""
         if 'slice_number' in self.data.columns:
             previously_copied = self.data['slice_number'] < 0
             self.data.loc[previously_copied, 'slice_number'] = np.nan
@@ -377,19 +599,24 @@ class DataVisualizationTool(QWidget):
                 self.data.loc[indices, phase_col] = np.nan
 
     def assign_phases(self, indices, phases):
-        """Assign computed phases to 'phase_{row}' columns."""
-        for row, (amplitude, phase) in phases.items():
+        """Assign computed phases to 'phase_{row}' columns for the selected indices."""
+        for row, (amp, ph) in phases.items():
             phase_col = f'phase_{row}'
             if phase_col not in self.data.columns:
                 self.data[phase_col] = np.nan
-            self.data.loc[indices, phase_col] = phase
-            print(f"Assigned phase {phase:.2f}° to '{phase_col}' for copied data.")
+            self.data.loc[indices, phase_col] = ph
+            print(f"Assigned phase {ph:.2f}° to '{phase_col}' for copied data.")
         self.update_status_bar()
 
     def paste_data(self, pos=None, scale=None):
-        """Paste copied data into the dataset."""
+        """
+        Paste previously copied data into the dataset at a specified position,
+        optionally scaled by 'scale'.
+        If pos or scale is None, prompt the user.
+        """
         if self.copied_data.empty:
             print("No data copied to paste.")
+            QMessageBox.warning(self, "Paste Data", "No data copied to paste.")
             return False
 
         pos = self.get_paste_position(pos)
@@ -406,7 +633,7 @@ class DataVisualizationTool(QWidget):
         return paste_success
 
     def get_paste_position(self, pos):
-        """Prompt user for paste position if not provided."""
+        """Prompt the user for the paste position if not provided."""
         if pos is not None:
             return pos
         pos, ok = QInputDialog.getInt(
@@ -415,7 +642,7 @@ class DataVisualizationTool(QWidget):
         return pos if ok else None
 
     def get_scale_factor(self, scale):
-        """Prompt user for scale factor if not provided."""
+        """Prompt the user for the scale factor if not provided."""
         if scale is not None:
             return scale
         scale, ok = QInputDialog.getDouble(
@@ -424,7 +651,7 @@ class DataVisualizationTool(QWidget):
         return scale if ok else None
 
     def perform_paste(self, pos, scale):
-        """Perform the paste operation."""
+        """Perform the actual paste operation (adding scaled copied data)."""
         paste_data_df = self.copied_data.copy() * scale
         paste_length = len(paste_data_df)
         start_idx, end_idx = pos, min(pos + paste_length, len(self.data))
@@ -432,16 +659,23 @@ class DataVisualizationTool(QWidget):
         if self.check_paste_overlap(start_idx, end_idx):
             return False
 
+        # Only paste as many rows as fit in the data
         paste_data_df = paste_data_df.iloc[:end_idx - start_idx]
+
+        # Add (not overwrite) the data
         self.data.loc[start_idx:end_idx - 1, paste_data_df.columns] += paste_data_df.values
         print(f"Pasted into position {start_idx} to {end_idx}")
 
+        # Mark pasted data & compute phases
         self.mark_pasted_data(start_idx, end_idx)
         self.compute_and_assign_phases(start_idx, end_idx)
         return True
 
     def check_paste_overlap(self, start_idx, end_idx):
-        """Check for overlap with existing pasted data."""
+        """
+        Check if the paste range overlaps with existing pasted data (slice_number not NaN).
+        If overlap is found, warn and return True (indicating conflict).
+        """
         if 'slice_number' in self.data.columns:
             overlap = self.data.loc[start_idx:end_idx - 1, 'slice_number'].notna().any()
             if overlap:
@@ -454,133 +688,33 @@ class DataVisualizationTool(QWidget):
         return False
 
     def mark_pasted_data(self, start_idx, end_idx):
-        """Mark pasted data with a new slice number."""
+        """Mark newly pasted data with a unique slice number."""
         if 'slice_number' not in self.data.columns:
             self.data['slice_number'] = np.nan
         self.paste_count += 1
         self.data.loc[start_idx:end_idx - 1, 'slice_number'] = self.paste_count
 
     def compute_and_assign_phases(self, start_idx, end_idx):
-        """Compute and assign phases for the pasted data."""
+        """Compute and assign phases for newly pasted data in the range [start_idx, end_idx)."""
         indices = self.data.index[start_idx:end_idx]
         phases = self.compute_phases_for_column_pairs(self.data, indices)
-        for row, (amplitude, phase) in phases.items():
+        for row, (amp, ph) in phases.items():
             phase_col = f'phase_{row}'
             if phase_col not in self.data.columns:
                 self.data[phase_col] = np.nan
-            self.data.loc[indices, phase_col] = phase
-            print(f"Computed phase for pasted data in pair {row}: {phase:.2f} degrees")
+            self.data.loc[indices, phase_col] = ph
+            print(f"Computed phase for pasted data in pair {row}: {ph:.2f} degrees")
         self.update_status_bar()
 
-    def save_data(self, data_to_save):
-        """Save the specified data to a file."""
-        if data_to_save.empty:
-            QMessageBox.warning(self, "Save Data", "No data selected to save.")
-            return
-        file_name, ok = QInputDialog.getText(self, 'Save File', 'Enter file name:')
-        if not ok or not file_name:
-            return
-        os.makedirs('saved', exist_ok=True)
-        try:
-            data_to_save.to_csv(f"saved/{file_name}.csv", index=False)
-            QMessageBox.information(self, "Save Data", f"Data saved to saved/{file_name}.csv")
-        except Exception as e:
-            QMessageBox.critical(self, "Save Data", f"Cannot save data to saved/{file_name}.csv:\n{e}")
-
-    def load_data(self):
-        """Load new data from a file."""
-        options = QFileDialog.Options()
-        file_name, _ = QFileDialog.getOpenFileName(
-            self, "Open Data File", "", "Data Files (*.csv *.dat *.txt);;All Files (*)", options=options
-        )
-        if file_name:
-            self.load_data_file(file_name)
-            self.copied_data = pd.DataFrame()
-            self.clear_plots()
-            self.initialize_plot_arrays()
-            self.create_plots()
-            self.setLayout(self.main_layout)
-            self.showMaximized()
-
-    def clear_plots(self):
-        """Clear existing plots from the layout."""
-        for i in reversed(range(self.plot_layout.count())):
-            widget = self.plot_layout.itemAt(i).widget()
-            if widget is not None:
-                widget.setParent(None)
-
-    def update_plot(self, row):
-        """Update a single plot based on current data."""
-        colN, colN1 = row * 2, row * 2 + 1
-
-        # Update grouped plots
-        for col, data in enumerate([(self.data.index, self.data[colN]), (self.data.index, self.data[colN1])]):
-            x_data, y_data = data
-            line = self.plot_lines_grouped[row, col]
-            line.set_xdata(x_data)
-            line.set_ydata(y_data)
-            ax = self.axes_grouped[row][col]
-            ax.relim()
-            ax.autoscale_view()
-
-        # Update colN vs colN+1 plot
-        line_colcol = self.plot_lines_colcol[row, 0]
-        line_colcol.set_xdata(self.data[colN])
-        line_colcol.set_ydata(self.data[colN1])
-        ax_colcol = self.axes_colcol[row][0]
-        ax_colcol.relim()
-        ax_colcol.autoscale_view()
-
-        # Redraw canvases
-        self.canvases[row, 0].draw_idle()
-        self.canvases[row, 1].draw_idle()
-
-    def update_all_plots(self):
-        """Update all plots."""
-        for row in range(self.num_pairs):
-            self.update_plot(row)
-
-    def on_xlim_changed_grouped(self, axes):
-        """Synchronize x-limits across all Column vs Index plots."""
-        if self.is_zooming:
-            return
-        self.is_zooming = True
-        try:
-            xlim = axes.get_xlim()
-            for row in range(self.num_pairs):
-                for ax in self.axes_grouped[row]:
-                    if ax != axes:
-                        ax.set_xlim(xlim)
-            for row in range(self.num_pairs):
-                self.canvases[row, 0].draw_idle()
-        finally:
-            self.is_zooming = False
-
-    def on_ylim_changed_grouped(self, axes):
-        """Synchronize y-limits across all Column vs Index plots."""
-        if self.is_zooming:
-            return
-        self.is_zooming = True
-        try:
-            ylim = axes.get_ylim()
-            for row in range(self.num_pairs):
-                for ax in self.axes_grouped[row]:
-                    if ax != axes:
-                        ax.set_ylim(ylim)
-            for row in range(self.num_pairs):
-                self.canvases[row, 0].draw_idle()
-        finally:
-            self.is_zooming = False
-
-    def get_row_from_figure(self, fig):
-        """Get the row index for a given figure."""
-        for row in range(self.num_pairs):
-            if fig == self.figures[row, 0] or fig == self.figures[row, 1]:
-                return row
-        return -1  # Not found
-
-    def randomize_paste_positions(self, xmin, xmax, num_pastes, scale_type, scale=None, scale_min=None, scale_max=None):
-        """Randomly paste data at different positions."""
+    # -------------------------------------------------------------------------
+    # Randomized Pasting
+    # -------------------------------------------------------------------------
+    def randomize_paste_positions(self, xmin, xmax, num_pastes, scale_type,
+                                  scale=None, scale_min=None, scale_max=None):
+        """
+        Randomly paste the copied data multiple times within the range [xmin, xmax).
+        scale_type can be 'Constant' or 'Random'.
+        """
         if self.copied_data.empty:
             QMessageBox.warning(self, "Randomize Paste", "No data copied to paste.")
             print("No data copied to paste.")
@@ -588,11 +722,8 @@ class DataVisualizationTool(QWidget):
 
         paste_length = len(self.copied_data)
         available_positions = self.get_available_positions(xmin, xmax, paste_length)
-
         if not available_positions:
-            QMessageBox.information(
-                self, "Randomize Paste", "No available positions to paste in the specified range."
-            )
+            QMessageBox.information(self, "Randomize Paste", "No available positions in the specified range.")
             print("No available positions to paste in the specified range.")
             return
 
@@ -602,7 +733,7 @@ class DataVisualizationTool(QWidget):
                 self, "Randomize Paste",
                 f"Only {max_pastes} out of {num_pastes} pastes can be performed due to limited available space."
             )
-            print(f"Only {max_pastes} out of {num_pastes} pastes can be performed due to limited space.")
+            print(f"Only {max_pastes} out of {num_pastes} paste(s) can be performed due to limited space.")
 
         selected_positions = random.sample(available_positions, max_pastes)
         pastes_done = 0
@@ -621,19 +752,162 @@ class DataVisualizationTool(QWidget):
         print(f"Successfully completed {pastes_done} out of {num_pastes} paste(s).")
 
     def get_available_positions(self, xmin, xmax, paste_length):
-        """Get a list of available positions for pasting."""
+        """Return a list of available (non-overlapping) positions for pasting within [xmin, xmax)."""
         possible_positions = range(xmin, xmax - paste_length + 1)
         available_positions = []
-
         for pos in possible_positions:
             if 'slice_number' not in self.data.columns or \
                self.data.loc[pos:pos + paste_length - 1, 'slice_number'].isna().all():
                 available_positions.append(pos)
         return available_positions
 
-    # UI Functions to show various menus and options
+    # -------------------------------------------------------------------------
+    # Saving Data
+    # -------------------------------------------------------------------------
+    def save_data(self, data_to_save):
+        """Save the given DataFrame to a CSV file, prompting for a name."""
+        if data_to_save.empty:
+            QMessageBox.warning(self, "Save Data", "No data selected to save.")
+            return
+
+        file_name, ok = QInputDialog.getText(self, 'Save File', 'Enter file name:')
+        if not ok or not file_name:
+            return
+
+        os.makedirs('saved', exist_ok=True)
+        try:
+            data_to_save.to_csv(f"saved/{file_name}.csv", index=False)
+            QMessageBox.information(self, "Save Data", f"Data saved to saved/{file_name}.csv")
+            print(f"Data saved to saved/{file_name}.csv")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Data", f"Cannot save data to saved/{file_name}.csv:\n{e}")
+            print(f"Error saving data: {e}")
+
+    # -------------------------------------------------------------------------
+    # Loading New Data
+    # -------------------------------------------------------------------------
+    def load_data(self):
+        """
+        Opens a file dialog for selecting a data file (CSV, DAT, or TXT),
+        then reloads plots with the new data.
+        """
+        options = QFileDialog.Options()
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Open Data File", "",
+            "Data Files (*.csv *.dat *.txt);;All Files (*)", options=options
+        )
+        if file_name:
+            self.load_data_file(file_name)
+            self.copied_data = pd.DataFrame()
+            self.clear_plots()
+            self.initialize_plot_arrays()
+            self.create_plots()
+            self.setLayout(self.main_layout)
+            self.showMaximized()
+
+    def clear_plots(self):
+        """Remove all existing plots from the layout before loading new data."""
+        for i in reversed(range(self.plot_layout.count())):
+            item = self.plot_layout.itemAt(i)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+
+    # -------------------------------------------------------------------------
+    # Plot Updating
+    # -------------------------------------------------------------------------
+    def update_plot(self, row):
+        """
+        Update plots for a given row (column pair) based on the latest self.data.
+        """
+        colN = row * 2
+        colN1 = colN + 1
+        colN_str, colN1_str = str(colN), str(colN1)
+
+        # -- Grouped plots (colN vs index, colN+1 vs index)
+        y_data_0 = self.data[colN_str].values
+        line0 = self.plot_lines_grouped[row, 0]
+        line0.set_ydata(y_data_0)
+
+        scatter0 = self.plot_scatter_grouped[row, 0]
+        if scatter0:
+            scatter0.set_offsets(np.column_stack((self.data.index, y_data_0)))
+            prob_col_name = f'defect_proba_{colN_str}'
+            if prob_col_name in self.data.columns:
+                scatter0.set_array(self.data[prob_col_name].values)
+
+        y_data_1 = self.data[colN1_str].values
+        line1 = self.plot_lines_grouped[row, 1]
+        line1.set_ydata(y_data_1)
+
+        scatter1 = self.plot_scatter_grouped[row, 1]
+        if scatter1:
+            scatter1.set_offsets(np.column_stack((self.data.index, y_data_1)))
+            prob_col_name = f'defect_proba_{colN_str}'
+            if prob_col_name in self.data.columns:
+                scatter1.set_array(self.data[prob_col_name].values)
+
+        for ax in self.axes_grouped[row]:
+            ax.relim()
+            ax.autoscale_view()
+
+        self.canvases[row, 0].draw_idle()
+
+        # -- colN vs colN+1 plot
+        line_colcol = self.plot_lines_colcol[row, 0]
+        line_colcol.set_xdata(self.data[colN_str])
+        line_colcol.set_ydata(self.data[colN1_str])
+        ax_colcol = self.axes_colcol[row][0]
+        ax_colcol.relim()
+        ax_colcol.autoscale_view()
+
+        self.canvases[row, 1].draw_idle()
+
+    def update_all_plots(self):
+        """Update all plots in the interface."""
+        for row in range(self.num_pairs):
+            self.update_plot(row)
+
+    # -------------------------------------------------------------------------
+    # Axis Synchronization (Group Plots)
+    # -------------------------------------------------------------------------
+    def on_xlim_changed_grouped(self, axes):
+        """Synchronize x-limits among all grouped column-index axes."""
+        if self.is_zooming:
+            return
+        self.is_zooming = True
+        try:
+            xlim = axes.get_xlim()
+            for row in range(self.num_pairs):
+                for ax in self.axes_grouped[row]:
+                    if ax != axes:
+                        ax.set_xlim(xlim)
+            for row in range(self.num_pairs):
+                self.canvases[row, 0].draw_idle()
+        finally:
+            self.is_zooming = False
+
+    def on_ylim_changed_grouped(self, axes):
+        """Synchronize y-limits among all grouped column-index axes."""
+        if self.is_zooming:
+            return
+        self.is_zooming = True
+        try:
+            ylim = axes.get_ylim()
+            for row in range(self.num_pairs):
+                for ax in self.axes_grouped[row]:
+                    if ax != axes:
+                        ax.set_ylim(ylim)
+            for row in range(self.num_pairs):
+                self.canvases[row, 0].draw_idle()
+        finally:
+            self.is_zooming = False
+
+    # -------------------------------------------------------------------------
+    # UI - Menus & Sub-Buttons
+    # -------------------------------------------------------------------------
     def show_data_interference_buttons(self):
-        """Show data interference menu."""
+        """Show a menu for data interference: copy, paste, randomize paste."""
         self.show_sub_buttons("Data interference menu", [
             ('Copy', self.copy_data),
             ('Paste', self.paste_data),
@@ -641,14 +915,14 @@ class DataVisualizationTool(QWidget):
         ])
 
     def show_save_data_buttons(self):
-        """Show save data menu."""
+        """Show a menu for saving data."""
         self.show_sub_buttons("Save menu", [
             ('Save Sliced Data', lambda: self.save_data(self.copied_data)),
             ('Save All Data', lambda: self.save_data(self.data))
         ])
 
     def show_precise_selection_fields(self):
-        """Show precise data selection menu."""
+        """Show fields for precise data selection by index range."""
         self.sub_button_widget.show()
         self.clear_layout(self.sub_button_layout)
         self.sub_button_widget.setTitle("Precise data selection menu")
@@ -660,27 +934,28 @@ class DataVisualizationTool(QWidget):
         for widget in [from_label, from_input, to_label, to_input, select_button]:
             self.sub_button_layout.addWidget(widget)
 
-        select_button.clicked.connect(lambda: self.precise_selection(from_input.text(), to_input.text()))
+        select_button.clicked.connect(
+            lambda: self.precise_selection(from_input.text(), to_input.text())
+        )
 
     def precise_selection(self, xmin_text, xmax_text):
-        """Handle precise data selection."""
+        """Handle user's precise data selection request."""
         try:
             xmin, xmax = int(xmin_text), int(xmax_text)
+            if xmin > xmax:
+                raise ValueError("From Index cannot be greater than To Index.")
             self.on_select(xmin, xmax)
-        except ValueError:
-            print("Please enter valid integer indices.")
-            QMessageBox.warning(
-                self, "Precise Selection",
-                "Please enter valid integer indices."
-            )
+        except ValueError as ve:
+            print(f"Precise selection error: {ve}")
+            QMessageBox.warning(self, "Precise Selection", f"Invalid input: {ve}")
 
     def show_randomize_paste_options(self):
-        """Show options for randomizing paste positions."""
+        """Show UI for randomizing paste positions."""
         self.sub_button_widget.show()
         self.clear_layout(self.sub_button_layout)
         self.sub_button_widget.setTitle("Randomize Paste Options")
 
-        # Widgets and labels
+        # Fields
         labels_texts = [
             ('Paste Position Range:', None),
             ('From Index:', '0'),
@@ -712,11 +987,12 @@ class DataVisualizationTool(QWidget):
         randomize_button = QPushButton('Randomize and Paste')
         self.sub_button_layout.addWidget(randomize_button)
 
-        # Update visibility based on scale type
+        # Show/hide fields based on selected scale type
         scale_fields = {
             'Constant': ['Constant Scale Factor:'],
             'Random': ['Random Scale Min:', 'Random Scale Max:']
         }
+        scale_type_dropdown = widgets['Scale Type:'][1]
 
         def update_scale_fields():
             selected_type = scale_type_dropdown.currentText()
@@ -724,7 +1000,8 @@ class DataVisualizationTool(QWidget):
                 label, input_widget = widgets[field]
                 is_visible = field in scale_fields[selected_type]
                 label.setVisible(is_visible)
-                input_widget.setVisible(is_visible)
+                if input_widget:
+                    input_widget.setVisible(is_visible)
 
         scale_type_dropdown.currentIndexChanged.connect(update_scale_fields)
         update_scale_fields()
@@ -736,7 +1013,7 @@ class DataVisualizationTool(QWidget):
         randomize_button.clicked.connect(on_randomize_paste_clicked)
 
     def handle_randomize_paste(self, widgets):
-        """Handle randomize paste based on user inputs."""
+        """Extract values from UI and perform randomize paste."""
         try:
             xmin = int(widgets['From Index:'][1].text())
             xmax = int(widgets['To Index:'][1].text())
@@ -744,12 +1021,7 @@ class DataVisualizationTool(QWidget):
             scale_type = widgets['Scale Type:'][1].currentText()
 
             if xmin > xmax or xmin < 0 or xmax >= len(self.data):
-                print("Invalid range. Ensure 0 <= From Index <= To Index < data length.")
-                QMessageBox.warning(
-                    self, "Randomize Paste",
-                    "Invalid range. Ensure 0 <= From Index <= To Index < data length."
-                )
-                return
+                raise ValueError("Ensure 0 <= From Index <= To Index < data length.")
 
             if scale_type == 'Constant':
                 scale = float(widgets['Constant Scale Factor:'][1].text())
@@ -758,40 +1030,38 @@ class DataVisualizationTool(QWidget):
                 scale_min = float(widgets['Random Scale Min:'][1].text())
                 scale_max = float(widgets['Random Scale Max:'][1].text())
                 if scale_min > scale_max:
-                    print("Invalid scale range. Ensure scale min <= scale max.")
-                    QMessageBox.warning(
-                        self, "Randomize Paste",
-                        "Invalid scale range. Ensure scale min <= scale max."
-                    )
-                    return
-                self.randomize_paste_positions(xmin, xmax, num_pastes, scale_type, scale_min=scale_min, scale_max=scale_max)
-        except ValueError:
-            print("Please enter valid integer and float values.")
-            QMessageBox.warning(
-                self, "Randomize Paste",
-                "Please enter valid integer and float values."
-            )
+                    raise ValueError("Ensure scale min <= scale max.")
+                self.randomize_paste_positions(
+                    xmin, xmax, num_pastes, scale_type, scale_min=scale_min, scale_max=scale_max
+                )
+        except ValueError as ve:
+            print(f"Randomize paste error: {ve}")
+            QMessageBox.warning(self, "Randomize Paste", f"Invalid input: {ve}")
 
     def show_sub_buttons(self, title, buttons):
-        """Show sub-buttons in the side panel."""
+        """Display a set of sub-buttons in the side panel."""
         self.sub_button_widget.show()
         self.clear_layout(self.sub_button_layout)
         self.sub_button_widget.setTitle(title)
+
         for text, func in buttons:
             button = QPushButton(text)
             button.clicked.connect(func)
             self.sub_button_layout.addWidget(button)
 
     def clear_layout(self, layout):
-        """Clear all widgets from a layout."""
+        """Remove all widgets from the given layout."""
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
-                widget.deleteLater()
+                widget.setParent(None)
 
+    # -------------------------------------------------------------------------
+    # Status Bar Update
+    # -------------------------------------------------------------------------
     def update_status_bar(self):
-        """Update the status bar with current phase information."""
+        """Update the status bar with the current phase information."""
         if not self.phase.any():
             self.status_bar.setText("Phases: N/A")
             return
@@ -803,10 +1073,14 @@ class DataVisualizationTool(QWidget):
                 phase_info.append(f"\nRow {row}: {phase_value:.2f}°")
             else:
                 phase_info.append(f"\nRow {row}: N/A")
-        status_text = "Phases: " + ", ".join(phase_info)
+
+        status_text = "Phases:" + "".join(phase_info)
         self.status_bar.setText(status_text)
 
 
+# -------------------------------------------------------------------------
+# Main Execution
+# -------------------------------------------------------------------------
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = DataVisualizationTool()
