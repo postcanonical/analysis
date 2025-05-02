@@ -42,7 +42,6 @@ class DataVisualizationTool(QWidget):
 
         # 2) Load initial data & create plots
         self.load_initial_data()
-        self.create_plots()
 
         # 3) Keyboard shortcuts
         self.setup_shortcuts()
@@ -163,51 +162,95 @@ class DataVisualizationTool(QWidget):
     def load_initial_data(self):
         """Load initial data from the default file path."""
         self.load_data()
-        self.initialize_plot_arrays()
+
+    def read_dep_to_df(self, file_path, n_channels, math_n_channels=0):
+        import os, numpy as np, pandas as pd
+
+        filesize = os.path.getsize(file_path)
+        if filesize <= 1024 or ((filesize - 1024) % (4 * n_channels)) != 0:
+            raise ValueError(f"Invalid DEP for {n_channels} channels")
+
+        n_samples = (filesize - 1024) // (4 * n_channels)
+        with open(file_path, 'rb') as f:
+            f.seek(1024)
+            raw = np.fromfile(f, dtype='<i2', count=2 * n_channels * n_samples)
+
+        raw = raw.reshape(n_samples, 2 * n_channels)
+        data = {}
+
+        # Raw channels: "0_X", "0_Y", "1_X", "1_Y", ...
+        for ch in range(n_channels):
+            x_col = f"{ch}_X"
+            y_col = f"{ch}_Y"
+            data[x_col] = raw[:, 2 * ch].astype(float)
+            data[y_col] = raw[:, 2 * ch + 1].astype(float)
+
+        # Math channels: "math0_X", "math0_Y", ...
+        if math_n_channels > 0:
+            base_X = data["0_X"]
+            base_Y = data["0_Y"]
+            for j in range(math_n_channels):
+                mx = np.zeros(n_samples, dtype=float)
+                my = np.zeros(n_samples, dtype=float)
+                diffs_X = (base_X[11:] - base_X[:-11]) / 5.0
+                diffs_Y = (base_Y[11:] - base_Y[:-11]) / 5.0
+                mx[6 : n_samples - 5] = diffs_X
+                my[6 : n_samples - 5] = diffs_Y
+                data[f"math{j}_X"] = mx
+                data[f"math{j}_Y"] = my
+
+        return pd.DataFrame(data)
 
     def load_data_file(self, file_path):
-        """
-        Load data from the specified file and rename columns if necessary.
-        - If CSV, load as CSV with existing headers.
-        - Otherwise, assume space-separated file.
-        - Reverse data rows and reset index.
-        - Initialize references for plots.
-        """
         try:
             if file_path.endswith('.csv'):
                 self.data = pd.read_csv(file_path)
                 print(f"Loaded CSV data from {file_path}")
+
+            elif file_path.lower().endswith('.dep'):
+                n_ch, ok = QInputDialog.getInt(
+                    self, "DEP Loader", "Number of raw channels:", value=8, min=1
+                )
+                if not ok:
+                    return
+                m_ch, ok2 = QInputDialog.getInt(
+                    self, "DEP Loader", "Number of math channels:", value=0, min=0
+                )
+                if not ok2:
+                    return
+                self.data = self.read_dep_to_df(file_path, n_ch, m_ch)
+                print(f"Loaded DEP data with {n_ch} raw and {m_ch} math channels")
+
             else:
                 self.data = pd.read_csv(file_path, sep=r'\s+', header=None)
                 num_cols = self.data.shape[1]
-                self.data.columns = [str(i) for i in range(num_cols)]
-                # Reverse rows
+                columns = []
+                for i in range(num_cols):
+                    channel = i // 2
+                    suffix = 'X' if i % 2 == 0 else 'Y'
+                    columns.append(f"{channel}_{suffix}")
+                self.data.columns = columns
                 self.data = self.data.iloc[::-1].reset_index(drop=True)
-                print(f"Loaded space-separated data from {file_path} and reversed rows")
+                print(f"Loaded space-separated data and renamed columns")
 
-            # Calculate how many pairs of columns are available
-            computed_pairs = len([col for col in self.data.columns if col.isdigit()]) // 2
+            raw_prefixes = set()
+            for col in self.data.columns:
+                parts = col.split('_')
+                if len(parts) == 2 and parts[1] in ['X', 'Y'] and parts[0].isdigit():
+                    raw_prefixes.add(parts[0])
+            computed_pairs = len(raw_prefixes)
+
             if self.predefined_num_pairs is not None:
-                # Use the predefined number, but not more than available
                 self.num_pairs = min(self.predefined_num_pairs, computed_pairs)
-                print(f"Predefined number of column pairs: {self.num_pairs} (available: {computed_pairs})")
             else:
                 self.num_pairs = computed_pairs
-                print(f"Number of column pairs to plot: {self.num_pairs}")
 
-            # Reinitialize scatter and selection lines with the correct size
             self.plot_scatter_grouped = np.empty((self.num_pairs, 2), dtype=object)
             self.selection_lines = [[[] for _ in range(2)] for _ in range(self.num_pairs)]
 
-        except FileNotFoundError:
-            QMessageBox.critical(self, "Error", f"Data file not found: {file_path}")
-            sys.exit(1)
-        except pd.errors.ParserError as e:
-            QMessageBox.critical(self, "Error", f"Error parsing data file: {e}")
-            sys.exit(1)
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
-            sys.exit(1)
+            QMessageBox.critical(self, "Error loading data", str(e))
+            return
 
     def initialize_plot_arrays(self):
         """Initialize arrays for figures, canvases, axes, and plot lines."""
@@ -232,32 +275,31 @@ class DataVisualizationTool(QWidget):
     def create_individual_plots(self, row):
         """
         Create individual plots for a given row (i.e., for a pair of columns):
-          1) Two subplots grouped (colN vs index, colN+1 vs index)
-          2) One subplot (colN vs colN+1)
+          1) Two subplots grouped (x_col vs index, y_col vs index)
+          2) One subplot (x_col vs y_col)
         """
-        colN = row * 2
-        colN1 = colN + 1
-        colN_str = str(colN)
-        colN1_str = str(colN1)
+        x_col = f"{row}_X"
+        y_col = f"{row}_Y"
+
 
         # -- 1) GROUPED PLOTS ------------------------------------------------
         fig_grouped, canvas_grouped = self.create_grouped_plot(row)
         self.figures[row, 0], self.canvases[row, 0] = fig_grouped, canvas_grouped
 
-        # Plot colN vs index
+        # Plot x_col vs index
         ax1, line1 = self.plot_column_vs_index(
             fig=fig_grouped,
-            data_column=self.data[colN_str],
-            label=f'Column {colN_str}',
+            data_column=self.data[x_col],
+            label=f'Column {x_col}',
             row=row,
             subplot_index=0
         )
 
-        # Plot colN+1 vs index
+        # Plot y_col vs index
         ax2, line2 = self.plot_column_vs_index(
             fig=fig_grouped,
-            data_column=self.data[colN1_str],
-            label=f'Column {colN1_str}',
+            data_column=self.data[y_col],
+            label=f'Column {y_col}',
             row=row,
             subplot_index=1,
             sharex=ax1
@@ -269,12 +311,12 @@ class DataVisualizationTool(QWidget):
         self.axes_grouped[row].extend([ax1, ax2])
 
         # Scatter for defect probability columns
-        prob_col_name = f'defect_proba_{colN // 2 + 1}'
+        prob_col_name = f'defect_proba_{row + 1}'
         if prob_col_name in self.data.columns:
-            print(f"Found {prob_col_name} for pair (col{colN_str}, col{colN1_str})")
+            print(f"Found {prob_col_name} for pair ({x_col}, {y_col})")
             scatter1 = ax1.scatter(
                 self.data.index,
-                self.data[colN_str],
+                self.data[x_col],
                 c=self.data[prob_col_name],
                 cmap='bwr',
                 vmin=0,
@@ -285,7 +327,7 @@ class DataVisualizationTool(QWidget):
             )
             scatter2 = ax2.scatter(
                 self.data.index,
-                self.data[colN1_str],
+                self.data[y_col],
                 c=self.data[prob_col_name],
                 cmap='bwr',
                 vmin=0,
@@ -297,7 +339,7 @@ class DataVisualizationTool(QWidget):
             self.plot_scatter_grouped[row, 0] = scatter1
             self.plot_scatter_grouped[row, 1] = scatter2
         else:
-            print(f"No {prob_col_name} found for pair (col{colN_str}, col{colN1_str})")
+            print(f"No {prob_col_name} found for pair ({x_col}, {y_col})")
             self.plot_scatter_grouped[row, 0] = None
             self.plot_scatter_grouped[row, 1] = None
 
@@ -308,16 +350,16 @@ class DataVisualizationTool(QWidget):
         # Synchronize axes
         self.synchronize_axes(ax1, ax2)
 
-        # -- 2) COLN vs COLN+1 PLOT -------------------------------------------
+        # -- 2) x_col vs y_col PLOT -------------------------------------------
         fig_colcol, canvas_colcol = self.create_plot_with_toolbar(row)
         self.figures[row, 1], self.canvases[row, 1] = fig_colcol, canvas_colcol
 
         ax_colcol, line_colcol = self.plot_column_vs_column(
             fig_colcol,
-            self.data[colN_str],
-            self.data[colN1_str],
-            colN_str,
-            colN1_str
+            self.data[x_col],
+            self.data[y_col],
+            x_col,
+            y_col
         )
         self.plot_lines_colcol[row, 0] = line_colcol
         self.axes_colcol[row].append(ax_colcol)
@@ -372,7 +414,7 @@ class DataVisualizationTool(QWidget):
         self.set_dark_theme(ax)
         return ax, line
 
-    def plot_column_vs_column(self, fig, x_data, y_data, colN_str, colN1_str):
+    def plot_column_vs_column(self, fig, x_data, y_data, x_col, y_col):
         """
         Plot one data column (x_data) vs another data column (y_data).
         :return: (axis, line) tuple
@@ -382,9 +424,9 @@ class DataVisualizationTool(QWidget):
             x_data,
             y_data,
             'g',
-            label=f'Column {colN_str} vs Column {colN1_str}'
+            label=f'Column {x_col} vs Column {y_col}'
         )
-        self.setup_plot(ax, f'Column {colN_str} vs Column {colN1_str}', f'Column {colN_str}', f'Column {colN1_str}')
+        self.setup_plot(ax, f'Column {x_col} vs Column {y_col}', f'Column {x_col}', f'Column {y_col}')
         self.set_dark_theme(ax)
         return ax, line
 
@@ -460,14 +502,13 @@ class DataVisualizationTool(QWidget):
           - Drawing vertical lines in the col vs index plots.
           - Redrawing updated canvases.
         """
-        colN = row * 2
-        colN1 = colN + 1
-        colN_str, colN1_str = str(colN), str(colN1)
+        x_col = f"{row}_X"
+        y_col = f"{row}_Y"
 
-        # 1) Update colN vs colN+1 line to show only the selected slice
+        # 1) Update x_col vs y_col line to show only the selected slice
         line_colcol = self.plot_lines_colcol[row, 0]
-        selected_x = self.data.loc[idx, colN_str]
-        selected_y = self.data.loc[idx, colN1_str]
+        selected_x = self.data.loc[idx, x_col]
+        selected_y = self.data.loc[idx, y_col]
         line_colcol.set_xdata(selected_x)
         line_colcol.set_ydata(selected_y)
 
@@ -476,7 +517,7 @@ class DataVisualizationTool(QWidget):
         ax_colcol.autoscale_view()
 
         # 2) For col vs index, add vertical lines at xmin and xmax
-        prob_col_name = f'defect_proba_{colN_str}'
+        prob_col_name = f'defect_proba_{x_col}'
         has_defect_proba = prob_col_name in self.data.columns
 
         for subplot_index in range(2):
@@ -490,9 +531,9 @@ class DataVisualizationTool(QWidget):
 
             # Update the y-data
             if subplot_index == 0:
-                y_data = self.data[colN_str]
+                y_data = self.data[x_col]
             else:
-                y_data = self.data[colN1_str]
+                y_data = self.data[y_col]
             self.plot_lines_grouped[row, subplot_index].set_ydata(y_data)
             ax.relim()
             ax.autoscale_view()
@@ -535,11 +576,10 @@ class DataVisualizationTool(QWidget):
         """
         phases = {}
         for row in range(self.num_pairs):
-            colN = row * 2
-            colN1 = colN + 1
-            colN_str, colN1_str = str(colN), str(colN1)
-            x = data.loc[indices, colN_str].values
-            y = data.loc[indices, colN1_str].values
+            x_col = f"{row}_X"
+            y_col = f"{row}_Y"
+            x = data.loc[indices, x_col].values
+            y = data.loc[indices, y_col].values
 
             if len(x) < 2 or len(y) < 2:
                 print(f"Not enough data to compute phase for pair {row}")
@@ -801,7 +841,7 @@ class DataVisualizationTool(QWidget):
         options = QFileDialog.Options()
         file_name, _ = QFileDialog.getOpenFileName(
             self, "Select a Data File", "",
-            "Data Files (*.csv *.dat *.txt);;All Files (*)", options=options
+            "Data Files (*.csv *.dat *.txt *.dep);;All Files (*)", options=options
         )
         if file_name:
             self.load_data_file(file_name)
@@ -827,30 +867,29 @@ class DataVisualizationTool(QWidget):
         """
         Update plots for a given row (column pair) based on the latest self.data.
         """
-        colN = row * 2
-        colN1 = colN + 1
-        colN_str, colN1_str = str(colN), str(colN1)
+        x_col = f"{row}_X"
+        y_col = f"{row}_Y"
 
-        # -- Grouped plots (colN vs index, colN+1 vs index)
-        y_data_0 = self.data[colN_str].values
+        # -- Grouped plots (x_col vs index, y_col vs index)
+        y_data_0 = self.data[x_col].values
         line0 = self.plot_lines_grouped[row, 0]
         line0.set_ydata(y_data_0)
 
         scatter0 = self.plot_scatter_grouped[row, 0]
         if scatter0:
             scatter0.set_offsets(np.column_stack((self.data.index, y_data_0)))
-            prob_col_name = f'defect_proba_{colN_str}'
+            prob_col_name = f'defect_proba_{x_col}'
             if prob_col_name in self.data.columns:
                 scatter0.set_array(self.data[prob_col_name].values)
 
-        y_data_1 = self.data[colN1_str].values
+        y_data_1 = self.data[y_col].values
         line1 = self.plot_lines_grouped[row, 1]
         line1.set_ydata(y_data_1)
 
         scatter1 = self.plot_scatter_grouped[row, 1]
         if scatter1:
             scatter1.set_offsets(np.column_stack((self.data.index, y_data_1)))
-            prob_col_name = f'defect_proba_{colN_str}'
+            prob_col_name = f'defect_proba_{x_col}'
             if prob_col_name in self.data.columns:
                 scatter1.set_array(self.data[prob_col_name].values)
 
@@ -860,10 +899,10 @@ class DataVisualizationTool(QWidget):
 
         self.canvases[row, 0].draw_idle()
 
-        # -- colN vs colN+1 plot
+        # -- x_col vs y_col plot
         line_colcol = self.plot_lines_colcol[row, 0]
-        line_colcol.set_xdata(self.data[colN_str])
-        line_colcol.set_ydata(self.data[colN1_str])
+        line_colcol.set_xdata(self.data[x_col])
+        line_colcol.set_ydata(self.data[y_col])
         ax_colcol = self.axes_colcol[row][0]
         ax_colcol.relim()
         ax_colcol.autoscale_view()
@@ -889,8 +928,11 @@ class DataVisualizationTool(QWidget):
                 for ax in self.axes_grouped[row]:
                     if ax != axes:
                         ax.set_xlim(xlim)
+            # only call draw_idle on non‐None canvases
             for row in range(self.num_pairs):
-                self.canvases[row, 0].draw_idle()
+                canvas = self.canvases[row, 0]
+                if canvas is not None:
+                    canvas.draw_idle()
         finally:
             self.is_zooming = False
 
@@ -905,10 +947,14 @@ class DataVisualizationTool(QWidget):
                 for ax in self.axes_grouped[row]:
                     if ax != axes:
                         ax.set_ylim(ylim)
+            # only call draw_idle on non‐None canvases
             for row in range(self.num_pairs):
-                self.canvases[row, 0].draw_idle()
+                canvas = self.canvases[row, 0]
+                if canvas is not None:
+                    canvas.draw_idle()
         finally:
             self.is_zooming = False
+
 
     # -------------------------------------------------------------------------
     # UI - Menus & Sub-Buttons
