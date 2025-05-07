@@ -48,6 +48,18 @@ class DataVisualizationTool(QWidget):
 
         # 4) Show the main window maximized
         self.showMaximized()
+        # —————————————————————————————————————————————————————————
+        # Memory for last-random-paste options
+        # —————————————————————————————————————————————————————————
+        self.last_random_paste_options = {
+            'from_index': '0',
+            'to_index': '5000',
+            'num_pastes': '1',
+            'scale_type': 'Constant',
+            'constant_scale': '1',
+            'random_scale_min': '0',
+            'random_scale_max': '1',
+        }
 
     # -------------------------------------------------------------------------
     # Initialization & Setup
@@ -311,7 +323,7 @@ class DataVisualizationTool(QWidget):
         self.axes_grouped[row].extend([ax1, ax2])
 
         # Scatter for defect probability columns
-        prob_col_name = f'defect_proba_{row + 1}'
+        prob_col_name = f'defect_proba_{row}'
         if prob_col_name in self.data.columns:
             print(f"Found {prob_col_name} for pair ({x_col}, {y_col})")
             scatter1 = ax1.scatter(
@@ -517,7 +529,7 @@ class DataVisualizationTool(QWidget):
         ax_colcol.autoscale_view()
 
         # 2) For col vs index, add vertical lines at xmin and xmax
-        prob_col_name = f'defect_proba_{x_col}'
+        prob_col_name = f'defect_proba_{row}'
         has_defect_proba = prob_col_name in self.data.columns
 
         for subplot_index in range(2):
@@ -817,17 +829,29 @@ class DataVisualizationTool(QWidget):
             QMessageBox.warning(self, "Save Data", "No data selected to save.")
             return
 
-        file_name, ok = QInputDialog.getText(self, 'Save File', 'Enter file name:')
-        if not ok or not file_name:
+        # use native Save File dialog pre-filled with last-loaded name
+        default_name = ""
+        if hasattr(self, 'current_file_path'):
+            base = os.path.splitext(os.path.basename(self.current_file_path))[0]
+            default_name = f"{base}.csv"
+
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save File",
+            default_name,
+            "CSV Files (*.csv);;All Files (*)",
+            options=options
+        )
+        if not file_path:
             return
 
-        os.makedirs('saved', exist_ok=True)
         try:
-            data_to_save.to_csv(f"saved/{file_name}.csv", index=False)
-            QMessageBox.information(self, "Save Data", f"Data saved to saved/{file_name}.csv")
-            print(f"Data saved to saved/{file_name}.csv")
+            data_to_save.to_csv(file_path, index=False)
+            QMessageBox.information(self, "Save Data", f"Data saved to {file_path}")
+            print(f"Data saved to {file_path}")
         except Exception as e:
-            QMessageBox.critical(self, "Save Data", f"Cannot save data to saved/{file_name}.csv:\n{e}")
+            QMessageBox.critical(self, "Save Data", f"Cannot save data to {file_path}:\n{e}")
             print(f"Error saving data: {e}")
 
     # -------------------------------------------------------------------------
@@ -839,12 +863,14 @@ class DataVisualizationTool(QWidget):
         then reloads plots with the new data.
         """
         options = QFileDialog.Options()
-        file_name, _ = QFileDialog.getOpenFileName(
+        file_path, _ = QFileDialog.getOpenFileName(
             self, "Select a Data File", "",
             "Data Files (*.csv *.dat *.txt *.dep);;All Files (*)", options=options
         )
-        if file_name:
-            self.load_data_file(file_name)
+        if file_path:
+            # remember for save dialog
+            self.current_file_path = file_path
+            self.load_data_file(file_path)
             self.copied_data = pd.DataFrame()
             self.clear_plots()
             self.initialize_plot_arrays()
@@ -878,7 +904,7 @@ class DataVisualizationTool(QWidget):
         scatter0 = self.plot_scatter_grouped[row, 0]
         if scatter0:
             scatter0.set_offsets(np.column_stack((self.data.index, y_data_0)))
-            prob_col_name = f'defect_proba_{x_col}'
+            prob_col_name = f'defect_proba_{row}'
             if prob_col_name in self.data.columns:
                 scatter0.set_array(self.data[prob_col_name].values)
 
@@ -889,7 +915,7 @@ class DataVisualizationTool(QWidget):
         scatter1 = self.plot_scatter_grouped[row, 1]
         if scatter1:
             scatter1.set_offsets(np.column_stack((self.data.index, y_data_1)))
-            prob_col_name = f'defect_proba_{x_col}'
+            prob_col_name = f'defect_proba_{row}'
             if prob_col_name in self.data.columns:
                 scatter1.set_array(self.data[prob_col_name].values)
 
@@ -1036,7 +1062,21 @@ class DataVisualizationTool(QWidget):
             else:
                 widgets[label_text] = (label, None)
 
-        # Randomize button
+        # ──────────────────────────────────────────────────
+        # Prefill with last-used options
+        # ──────────────────────────────────────────────────
+        widgets['From Index:'][1].setText(self.last_random_paste_options['from_index'])
+        widgets['To Index:'][1].setText(self.last_random_paste_options['to_index'])
+        widgets['Number of Pastes:'][1].setText(self.last_random_paste_options['num_pastes'])
+        combo = widgets['Scale Type:'][1]
+        idx = combo.findText(self.last_random_paste_options['scale_type'])
+        if idx != -1:
+            combo.setCurrentIndex(idx)
+        widgets['Constant Scale Factor:'][1].setText(self.last_random_paste_options['constant_scale'])
+        widgets['Random Scale Min:'][1].setText(self.last_random_paste_options['random_scale_min'])
+        widgets['Random Scale Max:'][1].setText(self.last_random_paste_options['random_scale_max'])
+        # ──────────────────────────────────────────────────
+
         randomize_button = QPushButton('Randomize and Paste')
         self.sub_button_layout.addWidget(randomize_button)
 
@@ -1059,7 +1099,6 @@ class DataVisualizationTool(QWidget):
         scale_type_dropdown.currentIndexChanged.connect(update_scale_fields)
         update_scale_fields()
 
-        # Connect randomize button
         def on_randomize_paste_clicked():
             self.handle_randomize_paste(widgets)
 
@@ -1079,17 +1118,40 @@ class DataVisualizationTool(QWidget):
             if scale_type == 'Constant':
                 scale = float(widgets['Constant Scale Factor:'][1].text())
                 self.randomize_paste_positions(xmin, xmax, num_pastes, scale_type, scale=scale)
+
+                # Update memory
+                self.last_random_paste_options.update({
+                    'from_index': str(xmin),
+                    'to_index': str(xmax),
+                    'num_pastes': str(num_pastes),
+                    'scale_type': scale_type,
+                    'constant_scale': str(scale),
+                })
+
             else:
                 scale_min = float(widgets['Random Scale Min:'][1].text())
                 scale_max = float(widgets['Random Scale Max:'][1].text())
                 if scale_min > scale_max:
                     raise ValueError("Ensure scale min <= scale max.")
                 self.randomize_paste_positions(
-                    xmin, xmax, num_pastes, scale_type, scale_min=scale_min, scale_max=scale_max
+                    xmin, xmax, num_pastes, scale_type,
+                    scale_min=scale_min, scale_max=scale_max
                 )
+
+                # Update memory
+                self.last_random_paste_options.update({
+                    'from_index': str(xmin),
+                    'to_index': str(xmax),
+                    'num_pastes': str(num_pastes),
+                    'scale_type': scale_type,
+                    'random_scale_min': str(scale_min),
+                    'random_scale_max': str(scale_max),
+                })
+
         except ValueError as ve:
             print(f"Randomize paste error: {ve}")
             QMessageBox.warning(self, "Randomize Paste", f"Invalid input: {ve}")
+
 
     def show_sub_buttons(self, title, buttons):
         """Display a set of sub-buttons in the side panel."""
@@ -1137,8 +1199,13 @@ class DataVisualizationTool(QWidget):
 if __name__ == '__main__':
     # New: Parse command-line arguments to accept a predefined num_pairs option
     parser = argparse.ArgumentParser(description="Data Visualization Tool")
-    parser.add_argument('--num_pairs', type=int, default=None,
-                        help="Predefined number of column pairs to plot")
+    parser.add_argument(
+        '-n', '--num_pairs',
+        type=int,
+        default=None,
+        help="Predefined number of column pairs to plot"
+    )
+
     args, unknown = parser.parse_known_args()
 
     app = QApplication(sys.argv)
