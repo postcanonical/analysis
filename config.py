@@ -15,7 +15,7 @@ THEMES = {
         "axes_bg": "white",
         "text_color": "black",
         "grid_color": "lightgray",
-        "line_color": "blue",  # This line ensures blue is the base/low-defect color
+        "line_color": "blue",
         "selection_color": "green",
         "span_color": "red"
     },
